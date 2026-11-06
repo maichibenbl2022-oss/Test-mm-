@@ -1,0 +1,2023 @@
+-- ==========================================================
+-- HOMELESS LIFE HACK v6.6 (v6.5 FULL + MONSTER CONTROL)
+-- ==========================================================
+-- PHAN 1/3: CORE + KEY + VOID CORE + UI CHINH
+-- ==========================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+local guiParent
+pcall(function() guiParent = game:GetService("CoreGui") end)
+if not guiParent then guiParent = LocalPlayer:WaitForChild("PlayerGui", 10) end
+
+-- ==========================================================
+-- KEY SYSTEM
+-- ==========================================================
+local KEY_TAIL     = ".  "
+local KEY_DURATION = 3600
+local KEY_FILE     = "HM_key65.dat"
+local unlocked = false
+local isOpen = false
+
+local function readKeyRaw()
+    local ok, d = pcall(function()
+        if readfile and isfile and isfile(KEY_FILE) then return readfile(KEY_FILE) end
+        return nil
+    end)
+    return ok and d or nil
+end
+local function writeKeyRaw(s) 
+    pcall(function() if writefile then writefile(KEY_FILE, s) end end) 
+end
+local function wipeKey() 
+    pcall(function() if writefile then writefile(KEY_FILE, "") end end) 
+end
+local function validateKey(k)
+    if type(k) ~= "string" or #k < 4 then return false end
+    if string.sub(k, -3) ~= KEY_TAIL then return false end
+    return true
+end
+local function keyValidNow()
+    local raw = readKeyRaw()
+    if not raw or raw == "" then return false end
+    local a, b = string.find(raw, "|", 1, true)
+    if not a then return false end
+    local k  = string.sub(raw, 1, a - 1)
+    local ts = tonumber(string.sub(raw, b + 1))
+    if not k or not ts or not validateKey(k) then return false end
+    if (os.time() - ts) >= KEY_DURATION then return false end
+    return true
+end
+
+-- ==========================================================
+-- SIGNAL ONLINE (gui reg len admin panel)
+-- ==========================================================
+local function SendRegSignal()
+    local ZW0, ZW1 = "\u{200B}", "\u{200C}"
+    local s = "HMOBS|reg|" .. LocalPlayer.UserId
+    local out = {}
+    for i = 1, #s do
+        local b = string.byte(s, i)
+        for j = 7, 0, -1 do out[#out + 1] = (math.floor(b / 2 ^ j) % 2 == 1) and ZW1 or ZW0 end
+    end
+    pcall(function()
+        local tcs = game:GetService("TextChatService")
+        if tcs and tcs.ChatVersion == Enum.ChatVersion.TextChatService then
+            local ch = tcs:FindFirstChild("TextChannels")
+            if ch and ch:FindFirstChild("RBXGeneral") then
+                ch.RBXGeneral:SendAsync(table.concat(out))
+            end
+        else
+            local ev = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+            if ev then
+                local say = ev:FindFirstChild("SayMessageRequest")
+                if say then say:FireServer(table.concat(out), "All") end
+            end
+        end
+    end)
+end
+task.spawn(function()
+    task.wait(3)
+    while true do
+        SendRegSignal()
+        task.wait(25)
+    end
+end)
+
+-- ==========================================================
+-- VOID CORE & EZY REMOTES
+-- ==========================================================
+local combatRemote = ReplicatedStorage:WaitForChild("CombatRemote", 5)
+local resetEvent = ReplicatedStorage:FindFirstChild("CustomResetEvent")
+local clientSideHitbox = ReplicatedStorage:FindFirstChild("ClientSideHitbox")
+
+local isBlockActive = false
+local isBlocking = false
+local cachedState = false
+local COMBAT_RANGE_SQ = 20 * 20
+local lastM1Time = 0
+local BUFFER_TIME = 0.05
+local totalBlocksTriggered = 0
+local activeM2Count = 0
+
+local originalFireServer
+if combatRemote then
+    pcall(function()
+        originalFireServer = hookfunction(combatRemote.FireServer, function(self, action, ...)
+            if self == combatRemote then
+                if action == "Block" then
+                    if cachedState or activeM2Count > 0 then return end
+                    cachedState = true
+                elseif action == "Unblock" then
+                    if not cachedState then return end
+                    cachedState = false
+                end
+            end
+            return originalFireServer(self, action, ...)
+        end)
+    end)
+end
+
+local M1_Hash = {
+    ["rbxassetid://107744565860298"]=true,["rbxassetid://78465715879407"]=true,["rbxassetid://115913899441210"]=true,["rbxassetid://78340978667002"]=true,
+    ["rbxassetid://110455480119234"]=true,["rbxassetid://113855977965817"]=true,["rbxassetid://100539690185628"]=true,["rbxassetid://75588770417512"]=true,
+    ["rbxassetid://76027121841204"]=true,["rbxassetid://85509536820244"]=true,["rbxassetid://76023809974201"]=true,["rbxassetid://80084984519164"]=true,
+    ["rbxassetid://112806679653887"]=true,["rbxassetid://116537886768128"]=true,["rbxassetid://77862408164627"]=true,["rbxassetid://117831676077280"]=true,
+    ["rbxassetid://108522383757676"]=true,["rbxassetid://80789969782354"]=true,["rbxassetid://137937685928015"]=true,
+}
+local M2_TargetID = "rbxassetid://97111539294139"
+
+local function rawUnblock()
+    if isBlocking and originalFireServer then
+        isBlocking = false
+        originalFireServer(combatRemote, "Unblock")
+    end
+end
+
+local function rawBlock()
+    if not isBlocking and activeM2Count == 0 and originalFireServer then
+        isBlocking = true
+        totalBlocksTriggered = totalBlocksTriggered + 1
+        originalFireServer(combatRemote, "Block")
+    end
+end
+
+local function setupM2DynamicListener(p)
+    if p == LocalPlayer then return end
+    local function onChar(char)
+        if not char then return end
+        local hum = char:WaitForChild("Humanoid", 5)
+        local root = char:WaitForChild("HumanoidRootPart", 5)
+        if not hum or not root then return end
+        
+        hum.AnimationPlayed:Connect(function(track)
+            if not isBlockActive then return end
+            local animId = track.Animation and track.Animation.AnimationId
+            if animId == M2_TargetID then
+                local myChar = LocalPlayer.Character
+                if myChar and myChar:FindFirstChild("HumanoidRootPart") then
+                    local myPos = myChar.HumanoidRootPart.Position
+                    local cPos = root.Position
+                    local dx, dy, dz = cPos.X - myPos.X, cPos.Y - myPos.Y, cPos.Z - myPos.Z
+                    if (dx * dx + dy * dy + dz * dz) <= COMBAT_RANGE_SQ then
+                        activeM2Count = activeM2Count + 1
+                        rawUnblock()
+                        local cleaned = false
+                        local stoppedConn, endedConn, diedConn
+                        local timeoutTask
+                        local function cleanup()
+                            if cleaned then return end
+                            cleaned = true
+                            activeM2Count = math.max(0, activeM2Count - 1)
+                            if stoppedConn then stoppedConn:Disconnect() end
+                            if endedConn then endedConn:Disconnect() end
+                            if diedConn then diedConn:Disconnect() end
+                            if timeoutTask then task.cancel(timeoutTask) end
+                        end
+                        stoppedConn = track.Stopped:Connect(cleanup)
+                        endedConn = track.Ended:Connect(cleanup)
+                        diedConn = hum.Died:Connect(cleanup)
+                        local animDuration = (track.Length > 0 and track.Length) or 1.5
+                        timeoutTask = task.delay(animDuration + 0.1, cleanup)
+                    end
+                end
+            end
+        end)
+    end
+    if p.Character then onChar(p.Character) end
+    p.CharacterAdded:Connect(onChar)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do setupM2DynamicListener(p) end
+Players.PlayerAdded:Connect(setupM2DynamicListener)
+
+-- ==========================================================
+-- UI CHINH
+-- ==========================================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "HM_" .. tick()
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999999
+ScreenGui.Parent = guiParent
+
+local HomeBtn = Instance.new("TextButton")
+HomeBtn.Size = UDim2.fromOffset(60, 60)
+HomeBtn.Position = UDim2.new(1, -100, 0, 100)
+HomeBtn.BackgroundColor3 = Color3.fromRGB(10, 12, 15)
+HomeBtn.Text = "🍉"
+HomeBtn.TextSize = 28
+HomeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+HomeBtn.Font = Enum.Font.GothamBold
+HomeBtn.BorderSizePixel = 0
+HomeBtn.AutoButtonColor = false
+HomeBtn.Active = true
+HomeBtn.Parent = ScreenGui
+Instance.new("UICorner", HomeBtn).CornerRadius = UDim.new(1, 0)
+local HomeStroke = Instance.new("UIStroke", HomeBtn)
+HomeStroke.Color = Color3.fromRGB(0, 255, 100)
+HomeStroke.Thickness = 2.5
+
+local KeyGui = Instance.new("Frame")
+KeyGui.Size = UDim2.fromOffset(380, 200)
+KeyGui.Position = UDim2.new(0.5, -190, 0.5, -100)
+KeyGui.BackgroundColor3 = Color3.fromRGB(8, 10, 14)
+KeyGui.BorderSizePixel = 0
+KeyGui.Active = true
+KeyGui.Visible = false
+KeyGui.Parent = ScreenGui
+Instance.new("UICorner", KeyGui).CornerRadius = UDim.new(0, 12)
+local KStroke = Instance.new("UIStroke", KeyGui)
+KStroke.Color = Color3.fromRGB(0, 255, 100)
+KStroke.Thickness = 1.5
+
+local KTitle = Instance.new("TextLabel", KeyGui)
+KTitle.Size = UDim2.new(1, 0, 0, 32)
+KTitle.Position = UDim2.new(0, 0, 0, 8)
+KTitle.BackgroundTransparency = 1
+KTitle.Text = "🔑 NHẬP KEY ĐỂ MỞ KHÓA"
+KTitle.TextColor3 = Color3.fromRGB(0, 255, 100)
+KTitle.TextSize = 14
+KTitle.Font = Enum.Font.GothamBlack
+
+local KBox = Instance.new("TextBox", KeyGui)
+KBox.Size = UDim2.new(1, -40, 0, 32)
+KBox.Position = UDim2.new(0, 20, 0, 50)
+KBox.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+KBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+KBox.TextSize = 11
+KBox.Font = Enum.Font.GothamBold
+KBox.PlaceholderText = "Nhập key..."
+KBox.PlaceholderColor3 = Color3.fromRGB(100, 105, 115)
+KBox.Text = ""
+KBox.ClearTextOnFocus = false
+KBox.Parent = KeyGui
+Instance.new("UICorner", KBox).CornerRadius = UDim.new(0, 6)
+
+local KStatus = Instance.new("TextLabel", KeyGui)
+KStatus.Size = UDim2.new(1, -40, 0, 16)
+KStatus.Position = UDim2.new(0, 20, 0, 88)
+KStatus.BackgroundTransparency = 1
+KStatus.Text = ""
+KStatus.TextColor3 = Color3.fromRGB(255, 100, 100)
+KStatus.TextSize = 9
+KStatus.Font = Enum.Font.GothamBold
+KStatus.TextXAlignment = Enum.TextXAlignment.Left
+
+local KBtn = Instance.new("TextButton", KeyGui)
+KBtn.Size = UDim2.new(1, -40, 0, 32)
+KBtn.Position = UDim2.new(0, 20, 0, 114)
+KBtn.BackgroundColor3 = Color3.fromRGB(0, 90, 35)
+KBtn.Text = "XÁC NHẬN"
+KBtn.TextColor3 = Color3.fromRGB(0, 255, 100)
+KBtn.TextSize = 11
+KBtn.Font = Enum.Font.GothamBlack
+KBtn.BorderSizePixel = 0
+KBtn.Parent = KeyGui
+Instance.new("UICorner", KBtn).CornerRadius = UDim.new(0, 6)
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.fromOffset(420, 360)
+Main.Position = UDim2.new(0.5, -210, 0.5, -180)
+Main.BackgroundColor3 = Color3.fromRGB(8, 10, 14)
+Main.BorderSizePixel = 0
+Main.Visible = false
+Main.Active = true
+Main.Parent = ScreenGui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 12)
+local MainStroke = Instance.new("UIStroke", Main)
+MainStroke.Color = Color3.fromRGB(0, 255, 100)
+MainStroke.Thickness = 1.5
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, 100, 1, 0)
+Sidebar.BackgroundColor3 = Color3.fromRGB(12, 15, 20)
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Main
+Instance.new("UICorner", Sidebar).CornerRadius = UDim.new(0, 12)
+
+local MemeImg = Instance.new("ImageLabel", Sidebar)
+MemeImg.Size = UDim2.new(0.8, 0, 0, 60)
+MemeImg.Position = UDim2.new(0.1, 0, 0, 4)
+MemeImg.BackgroundTransparency = 1
+MemeImg.Image = "rbxassetid://1076805417"
+MemeImg.ScaleType = Enum.ScaleType.Fit
+
+local Logo = Instance.new("TextLabel", Sidebar)
+Logo.Size = UDim2.new(1, 0, 0, 26)
+Logo.Position = UDim2.new(0, 0, 0, 64)
+Logo.BackgroundColor3 = Color3.fromRGB(0, 80, 40)
+Logo.Text = "🍉 MENU"
+Logo.TextColor3 = Color3.fromRGB(0, 255, 100)
+Logo.TextSize = 9
+Logo.Font = Enum.Font.GothamBlack
+Logo.Parent = Sidebar
+Instance.new("UICorner", Logo).CornerRadius = UDim.new(0, 12)
+
+local function MakePageBtn(text, y)
+    local b = Instance.new("TextButton", Sidebar)
+    b.Size = UDim2.new(1, -8, 0, 22)
+    b.Position = UDim2.new(0, 4, 0, y)
+    b.Text = text
+    b.TextColor3 = Color3.fromRGB(140, 140, 140)
+    b.TextSize = 9
+    b.Font = Enum.Font.GothamBold
+    b.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    b.BorderSizePixel = 0
+    b.AutoButtonColor = false
+    b.TextXAlignment = Enum.TextXAlignment.Left
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    local p = Instance.new("UIPadding", b)
+    p.PaddingLeft = UDim.new(0, 5)
+    return b
+end
+
+local BtnM1     = MakePageBtn("⚡ M1 SPAM", 94)
+local BtnOR     = MakePageBtn("🌀 OR XOAY", 117)
+local BtnFarm   = MakePageBtn("💰 FARM",    140)
+local BtnAtk    = MakePageBtn("⚔ TAN CONG", 163)
+local BtnMove   = MakePageBtn("🏃 DI CHUYEN", 186)
+local BtnVis    = MakePageBtn("👁 HIEN THI", 209)
+local BtnAura   = MakePageBtn("✨ AURA",     232)
+local BtnExtra  = MakePageBtn("🎁 TIEN ICH", 255)
+local BtnMonster= MakePageBtn("👹 QUAI",     278)
+local BtnSet    = MakePageBtn("⚙ CAI DAT",  301)
+
+local Content = Instance.new("ScrollingFrame", Main)
+Content.Size = UDim2.new(1, -105, 1, -8)
+Content.Position = UDim2.new(0, 102, 0, 4)
+Content.BackgroundTransparency = 1
+Content.BorderSizePixel = 0
+Content.ScrollBarThickness = 4
+Content.ScrollBarImageColor3 = Color3.fromRGB(0, 255, 100)
+Content.CanvasSize = UDim2.new(0, 0, 0, 1500)
+Content.ScrollingDirection = Enum.ScrollingDirection.Y
+
+local function MakePage()
+    local f = Instance.new("Frame", Content)
+    f.Size = UDim2.new(1, -8, 0, 1500)
+    f.BackgroundTransparency = 1
+    f.Visible = false
+    return f
+end
+
+local PageM1      = MakePage()
+local PageOR      = MakePage()
+local PageFarm    = MakePage()
+local PageAtk     = MakePage()
+local PageMove    = MakePage()
+local PageVis     = MakePage()
+local PageAura    = MakePage()
+local PageExtra   = MakePage()
+local PageMonster = MakePage()
+local PageSet     = MakePage()
+
+local PageBtns = {BtnM1, BtnOR, BtnFarm, BtnAtk, BtnMove, BtnVis, BtnAura, BtnExtra, BtnMonster, BtnSet}
+local Pages = {PageM1, PageOR, PageFarm, PageAtk, PageMove, PageVis, PageAura, PageExtra, PageMonster, PageSet}
+
+local function ShowPage(index)
+    for i = 1, 10 do
+        Pages[i].Visible = (i == index)
+        if i == index then
+            PageBtns[i].BackgroundColor3 = Color3.fromRGB(0, 90, 35)
+            PageBtns[i].TextColor3 = Color3.fromRGB(0, 255, 100)
+        else
+            PageBtns[i].BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+            PageBtns[i].TextColor3 = Color3.fromRGB(140, 140, 140)
+        end
+    end
+    Content.CanvasPosition = Vector2.new(0, 0)
+end
+for i, btn in ipairs(PageBtns) do
+    btn.MouseButton1Click:Connect(function() ShowPage(i) end)
+end-- ==========================================================
+-- PHAN 2/3: HELPERS + STATE + PAGE FILL + LOGIC CO BAN
+-- ==========================================================
+
+local Remotes = {}
+local ManualRemotes = {}
+local Allies = {}
+
+local function ChatSpam(msg)
+    pcall(function()
+        local tcs = game:GetService("TextChatService")
+        if tcs and tcs.ChatVersion == Enum.ChatVersion.TextChatService then
+            local ch = tcs:FindFirstChild("TextChannels")
+            if ch and ch:FindFirstChild("RBXGeneral") then ch.RBXGeneral:SendAsync(msg) end
+        else
+            local ev = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+            if ev then local say = ev:FindFirstChild("SayMessageRequest") if say then say:FireServer(msg, "All") end end
+        end
+    end)
+end
+
+local function AddTitle(text, parent, y)
+    local l = Instance.new("TextLabel", parent)
+    l.Size = UDim2.new(1, -8, 0, 20)
+    l.Position = UDim2.new(0, 4, 0, y)
+    l.BackgroundTransparency = 1
+    l.Text = text
+    l.TextColor3 = Color3.fromRGB(0, 255, 100)
+    l.TextSize = 10
+    l.Font = Enum.Font.GothamBlack
+    l.TextXAlignment = Enum.TextXAlignment.Left
+end
+
+local function AddToggle(label, getState, setState, parent, y, notifFunc)
+    local f = Instance.new("Frame", parent)
+    f.Size = UDim2.new(1, -8, 0, 28)
+    f.Position = UDim2.new(0, 4, 0, y)
+    f.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 6)
+    local lbl = Instance.new("TextLabel", f)
+    lbl.Size = UDim2.new(1, -50, 1, 0)
+    lbl.Position = UDim2.new(0, 8, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.TextSize = 9
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    local tr = Instance.new("Frame", f)
+    tr.Size = UDim2.fromOffset(34, 18)
+    tr.Position = UDim2.new(1, -42, 0.5, -9)
+    tr.BackgroundColor3 = Color3.fromRGB(30, 35, 42)
+    Instance.new("UICorner", tr).CornerRadius = UDim.new(1, 0)
+    local kn = Instance.new("Frame", tr)
+    kn.Size = UDim2.fromOffset(14, 14)
+    kn.Position = UDim2.new(0, 2, 0.5, -7)
+    kn.BackgroundColor3 = Color3.fromRGB(180, 180, 180)
+    Instance.new("UICorner", kn).CornerRadius = UDim.new(1, 0)
+    local function up(s)
+        if s then
+            tr.BackgroundColor3 = Color3.fromRGB(0, 90, 35)
+            kn.Position = UDim2.new(1, -16, 0.5, -7)
+            kn.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+        else
+            tr.BackgroundColor3 = Color3.fromRGB(30, 35, 42)
+            kn.Position = UDim2.new(0, 2, 0.5, -7)
+            kn.BackgroundColor3 = Color3.fromRGB(180, 180, 180)
+        end
+    end
+    f.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            local ns = not getState()
+            setState(ns)
+            up(ns)
+            pcall(function()
+                if ns then
+                    ChatSpam(notifFunc and notifFunc() or ("[kas] ĐÃ BẬT " .. label))
+                else
+                    ChatSpam("[kas] ĐÃ TẮT " .. label)
+                end
+            end)
+        end
+    end)
+    up(getState())
+end
+
+local function AddSlider(name, value, minV, maxV, cb, parent, y, isF)
+    local f = Instance.new("Frame", parent)
+    f.Size = UDim2.new(1, -8, 0, 36)
+    f.Position = UDim2.new(0, 4, 0, y)
+    f.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    Instance.new("UICorner", f).CornerRadius = UDim.new(0, 6)
+    local lbl = Instance.new("TextLabel", f)
+    lbl.Size = UDim2.new(1, -60, 0, 12)
+    lbl.BackgroundTransparency = 1
+    local d0 = isF and string.format("%.2f", value) or tostring(math.floor(value))
+    lbl.Text = name .. ": " .. d0
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.TextSize = 8
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    local pad = Instance.new("UIPadding", lbl)
+    pad.PaddingLeft = UDim.new(0, 8)
+    local tr = Instance.new("Frame", f)
+    tr.Size = UDim2.new(1, -60, 0, 5)
+    tr.Position = UDim2.new(0, 8, 0, 22)
+    tr.BackgroundColor3 = Color3.fromRGB(30, 35, 42)
+    Instance.new("UICorner", tr).CornerRadius = UDim.new(1, 0)
+    local fl = Instance.new("Frame", tr)
+    fl.Size = UDim2.new((value - minV) / (maxV - minV), 0, 1, 0)
+    fl.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+    Instance.new("UICorner", fl).CornerRadius = UDim.new(1, 0)
+    local kn = Instance.new("Frame", tr)
+    kn.Size = UDim2.fromOffset(11, 11)
+    kn.Position = UDim2.new((value - minV) / (maxV - minV), -5, 0.5, -5)
+    kn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    Instance.new("UICorner", kn).CornerRadius = UDim.new(1, 0)
+    local function setV(v)
+        v = math.clamp(v, minV, maxV)
+        if not isF then v = math.floor(v) end
+        value = v
+        local pct = (v - minV) / (maxV - minV)
+        local d = isF and string.format("%.2f", v) or tostring(math.floor(v))
+        lbl.Text = name .. ": " .. d
+        fl.Size = UDim2.new(pct, 0, 1, 0)
+        kn.Position = UDim2.new(pct, -5, 0.5, -5)
+        pcall(cb, v)
+    end
+    local minus = Instance.new("TextButton", f)
+    minus.Size = UDim2.fromOffset(18, 18)
+    minus.Position = UDim2.new(1, -44, 0.5, -9)
+    minus.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    minus.Text = "-"
+    minus.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minus.TextSize = 12
+    minus.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", minus).CornerRadius = UDim.new(0, 4)
+    minus.MouseButton1Click:Connect(function() setV(value - (isF and 0.1 or 1)) end)
+    local plus = Instance.new("TextButton", f)
+    plus.Size = UDim2.fromOffset(18, 18)
+    plus.Position = UDim2.new(1, -22, 0.5, -9)
+    plus.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+    plus.Text = "+"
+    plus.TextColor3 = Color3.fromRGB(255, 255, 255)
+    plus.TextSize = 12
+    plus.Font = Enum.Font.GothamBold
+    Instance.new("UICorner", plus).CornerRadius = UDim.new(0, 4)
+    plus.MouseButton1Click:Connect(function() setV(value + (isF and 0.1 or 1)) end)
+    local drag = false
+    tr.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            drag = true
+            local rx = input.Position.X - tr.AbsolutePosition.X
+            setV(minV + math.clamp(rx / tr.AbsoluteSize.X, 0, 1) * (maxV - minV))
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local rx = input.Position.X - tr.AbsolutePosition.X
+            setV(minV + math.clamp(rx / tr.AbsoluteSize.X, 0, 1) * (maxV - minV))
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then drag = false end
+    end)
+end
+
+local function AddButton(label, cb, parent, y, color)
+    local b = Instance.new("TextButton", parent)
+    b.Size = UDim2.new(1, -8, 0, 26)
+    b.Position = UDim2.new(0, 4, 0, y)
+    b.Text = label
+    b.TextColor3 = color or Color3.fromRGB(220, 220, 220)
+    b.TextSize = 9
+    b.Font = Enum.Font.GothamBold
+    b.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    b.BorderSizePixel = 0
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    b.MouseButton1Click:Connect(function() pcall(cb) end)
+end
+
+local function AddTextBox(ph, parent, y)
+    local t = Instance.new("TextBox", parent)
+    t.Size = UDim2.new(1, -8, 0, 24)
+    t.Position = UDim2.new(0, 4, 0, y)
+    t.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    t.TextColor3 = Color3.fromRGB(255, 255, 255)
+    t.TextSize = 9
+    t.Font = Enum.Font.Gotham
+    t.Text = ""
+    t.PlaceholderText = ph
+    t.PlaceholderColor3 = Color3.fromRGB(100, 105, 115)
+    Instance.new("UICorner", t).CornerRadius = UDim.new(0, 6)
+    return t
+end
+
+-- ==========================================================
+-- STATE & CONFIG
+-- ==========================================================
+local State = {
+    M1Spam=false, ORLock=false, Farm=false, Aim=false, Spam=false,
+    Dash=false, Fly=false, TP=false, ESP=false, Hitbox=false,
+    Aura=false, AntiStun=false, GodMode=true, NoHunger=true,
+    LAGMode=false, NoClip=false, Nametag=false, Spin=false, AutoBlock=false,
+    Troll=false,
+    -- Monster
+    MonsterCollect=false, MonsterSummon=false, MonsterOrbit=true, MonsterAttack=true
+}
+
+local Config = {
+    M1Rate=0.15, SpamRate=0.05, AttackRange=50,
+    ORRange=9999, ORNear=15, ORMode="FOLLOW", ORRotSpeed=150, orbitAngle=0,
+    ORHeight=2.5, ORDistance=3, ORWalkSpeed=18,
+    DashAttackDuration=1, DashWaitDuration=1, DashHitRate=0.03,
+    DashOrbitRadius=4, DashOrbitSpeed=300, DashGroundOffset=1,
+    TPLoopTime=10,
+    AutoReset = false, ResetTime = 10,
+    AntiDetect=true, FlySpeed=50, TPDistance=3, HitboxSize=15,
+    Target=nil, TargetName="", FarmRadius=30, FarmClicks=5, FarmDelay=3,
+    FarmPos=nil, FarmWaiting=false, FarmRunning=false, HealThreshold=30,
+    -- Monster
+    MonsterTargetName="", MonsterTarget=nil, MonsterMode="OFF",
+    MonsterOrbitRadius=6, MonsterOrbitHeight=2, MonsterOrbitSpeed=90,
+    MonsterAggroRange=300, MonsterAttackCD=0.4, MonsterFollowSpeed=1.2,
+    MonsterMax=50
+}
+
+local ORLastTarget = nil
+local dashSavedPos = nil
+local dashPhase = "idle"
+local dashTimer = 0
+local dashNextHit = 0
+local dashOrbitAngle = 0
+local lastResetTimer = 0
+local trollPart = nil
+local tpTarget = nil
+local tpStartTime = 0
+
+-- Monster runtime
+local monsters = {}
+local monsterAttackTime = {}
+local monsterOrbitAngle = 0
+
+local function ResetDash()
+    dashPhase = "idle"
+    dashSavedPos = nil
+    dashTimer = 0
+    dashOrbitAngle = 0
+    lastResetTimer = tick()
+end
+
+local function Valid(p)
+    if not p or p == LocalPlayer or Allies[p.Name] then return false end
+    local c = p.Character
+    if not c then return false end
+    local r = c:FindFirstChild("HumanoidRootPart")
+    local h = c:FindFirstChildOfClass("Humanoid")
+    return r and h and h.Health > 0
+end
+
+local function FindNearest(range)
+    local mr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not mr then return nil end
+    local best, bd = nil, range or 100
+    for _, p in ipairs(Players:GetPlayers()) do
+        if Valid(p) then
+            local r = p.Character:FindFirstChild("HumanoidRootPart")
+            if r then
+                local d = (mr.Position - r.Position).Magnitude
+                if d < bd then bd = d; best = p end
+            end
+        end
+    end
+    return best
+end
+
+local function FindByName(name)
+    if not name or name == "" then return nil end
+    name = string.lower(name)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and string.find(string.lower(p.Name), name, 1, true) then return p end
+    end
+    return nil
+end
+
+local function GetTool()
+    local c = LocalPlayer.Character
+    if not c then return nil end
+    local t = c:FindFirstChildOfClass("Tool")
+    if t then return t end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        for _, x in ipairs(bp:GetChildren()) do
+            if x:IsA("Tool") then x.Parent = c; return x end
+        end
+    end
+    return nil
+end
+
+local function EzyFastAttack(target)
+    local c = LocalPlayer.Character
+    if not c then return end
+    local hum = c:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    for _, track in ipairs(hum:GetPlayingAnimationTracks()) do
+        pcall(function()
+            if track.Priority == Enum.AnimationPriority.Action or track.Priority == Enum.AnimationPriority.Action2 then
+                track:Stop(0.1)
+            end
+        end)
+    end
+    local tool = c:FindFirstChildOfClass("Tool")
+    if tool then pcall(function() tool:Activate() end) end
+    if clientSideHitbox and target then
+        pcall(function() clientSideHitbox:FireServer(target, buffer.fromstring("10069.74")) end)
+    end
+    if combatRemote then
+        pcall(function() combatRemote:FireServer("M1") end)
+        pcall(function() combatRemote:FireServer("Attack") end)
+    end
+    for _, r in ipairs(Remotes) do
+        pcall(function() r:FireServer("M1") end)
+        pcall(function() r:FireServer() end)
+    end
+    for _, r in ipairs(ManualRemotes) do
+        pcall(function() r:FireServer("M1") end)
+        pcall(function() r:FireServer("Attack") end)
+        pcall(function() r:FireServer() end)
+    end
+end
+
+local function HitAll(target)
+    local c = LocalPlayer.Character
+    if not c then return end
+    for _, t in ipairs(c:GetChildren()) do
+        if t:IsA("Tool") then pcall(function() t.Enabled = true; t:Activate() end) end
+    end
+    for _, r in ipairs(Remotes) do
+        pcall(function() r:FireServer("M1") end)
+        pcall(function() r:FireServer() end)
+    end
+    for _, r in ipairs(ManualRemotes) do
+        pcall(function() r:FireServer("M1") end)
+        pcall(function() r:FireServer("Attack") end)
+        pcall(function() r:FireServer() end)
+    end
+    if clientSideHitbox and target then
+        pcall(function() clientSideHitbox:FireServer(target, buffer.fromstring("10069.74")) end)
+    end
+    if combatRemote then 
+        pcall(function() combatRemote:FireServer("M1") end) 
+        pcall(function() combatRemote:FireServer("Attack") end) 
+    end
+end
+
+-- ==========================================================
+-- UI FILL - PAGE M1
+-- ==========================================================
+AddTitle("⚡ M1 SPAM", PageM1, 6)
+AddToggle("M1 SPAM", function() return State.M1Spam end, function(v) State.M1Spam = v end, PageM1, 30,
+    function() return "[kas] ĐÃ BẬT M1 SPAM, DELAY " .. string.format("%.2f", Config.M1Rate) end)
+AddSlider("DELAY", Config.M1Rate, 0.05, 2, function(v) Config.M1Rate=v end, PageM1, 62, true)
+AddSlider("RANGE", Config.AttackRange, 5, 200, function(v) Config.AttackRange=v end, PageM1, 100)
+
+AddTitle("🔗 GẮN REMOTE M1 THỦ CÔNG", PageM1, 150)
+local M1RemoteBox = AddTextBox("Nhập tên Remote (VD: AttackRemote)", PageM1, 174)
+AddButton("LƯU REMOTE M1", function()
+    local rName = M1RemoteBox.Text
+    if rName == "" then return end
+    local found = false
+    for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
+        if v.Name == rName and (v:IsA("RemoteEvent") or v:IsA("RemoteFunction")) then
+            table.insert(ManualRemotes, v)
+            found = true
+        end
+    end
+    if found then ChatSpam("[kas] ĐÃ GẮN REMOTE: " .. rName)
+    else ChatSpam("[kas] KHÔNG TÌM THẤY REMOTE: " .. rName) end
+end, PageM1, 204, Color3.fromRGB(0, 255, 100))
+
+-- PAGE OR
+AddTitle("🌀 OR XOAY", PageOR, 6)
+local TargetBox = AddTextBox("Nhap ten nguoi choi", PageOR, 28)
+local statusLbl = Instance.new("TextLabel", PageOR)
+statusLbl.Size = UDim2.new(1, -8, 0, 14)
+statusLbl.Position = UDim2.new(0, 4, 0, 56)
+statusLbl.BackgroundTransparency = 1
+statusLbl.Text = "Che do: FOLLOW | OFF"
+statusLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+statusLbl.TextSize = 8
+statusLbl.Font = Enum.Font.Gotham
+statusLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+local ModeBtns = {}
+local function AddModeBtn(label, mode, parent, x, y)
+    local b = Instance.new("TextButton", parent)
+    b.Size = UDim2.new(0.48, 0, 1, 0)
+    b.Position = UDim2.new(x, 0, 0, y)
+    b.Text = label
+    b.TextColor3 = Color3.fromRGB(200, 200, 200)
+    b.TextSize = 8
+    b.Font = Enum.Font.GothamBold
+    b.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    b.BorderSizePixel = 0
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    b.MouseButton1Click:Connect(function()
+        if mode ~= "DASH" and mode ~= "EZY" then ResetDash() end
+        Config.ORMode = mode
+        for k, v in pairs(ModeBtns) do
+            if k == mode then
+                v.BackgroundColor3 = Color3.fromRGB(0, 90, 35)
+                v.TextColor3 = Color3.fromRGB(0, 255, 100)
+            else
+                v.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+                v.TextColor3 = Color3.fromRGB(200, 200, 200)
+            end
+        end
+        statusLbl.Text = "Che do: " .. mode .. " | " .. (State.ORLock and "ON" or "OFF")
+    end)
+    ModeBtns[mode] = b
+end
+
+local mr1 = Instance.new("Frame", PageOR); mr1.Size=UDim2.new(1,-8,0,22); mr1.Position=UDim2.new(0,4,0,72); mr1.BackgroundTransparency=1
+local mr2 = Instance.new("Frame", PageOR); mr2.Size=UDim2.new(1,-8,0,22); mr2.Position=UDim2.new(0,4,0,96); mr2.BackgroundTransparency=1
+local mr3 = Instance.new("Frame", PageOR); mr3.Size=UDim2.new(1,-8,0,22); mr3.Position=UDim2.new(0,4,0,120); mr3.BackgroundTransparency=1
+local mr4 = Instance.new("Frame", PageOR); mr4.Size=UDim2.new(1,-8,0,22); mr4.Position=UDim2.new(0,4,0,144); mr4.BackgroundTransparency=1
+
+AddModeBtn("FOLLOW","FOLLOW",mr1,0,0)
+AddModeBtn("STICK","STICK",mr1,0.52,0)
+AddModeBtn("BEHIND","BEHIND",mr2,0,0)
+AddModeBtn("ORBIT","ORBIT",mr2,0.52,0)
+AddModeBtn("DELAY","DELAY",mr3,0,0)
+AddModeBtn("SLIDE","SLIDE",mr3,0.52,0)
+AddModeBtn("DASH","DASH",mr4,0,0)
+AddModeBtn("EZY","EZY",mr4,0.52,0)
+
+ModeBtns.FOLLOW.BackgroundColor3 = Color3.fromRGB(0, 90, 35)
+ModeBtns.FOLLOW.TextColor3 = Color3.fromRGB(0, 255, 100)
+
+AddToggle("OR XOAY PRO", function() return State.ORLock end, function(v)
+    State.ORLock = v
+    if v then
+        Config.TargetName = TargetBox.Text
+        local found
+        if Config.TargetName == "" then found = FindNearest(Config.ORRange)
+        else found = FindByName(Config.TargetName) end
+        if found then
+            Config.Target = found
+            GetTool()
+            ResetDash()
+            statusLbl.Text = "Che do: " .. Config.ORMode .. " | " .. found.Name
+            statusLbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+        else
+            Config.Target = nil
+            if Config.TargetName == "" then
+                State.ORLock = false
+                statusLbl.Text = "Khong co ai"
+            else
+                statusLbl.Text = "Cho '" .. Config.TargetName .. "' vao game..."
+                statusLbl.TextColor3 = Color3.fromRGB(255, 200, 100)
+            end
+        end
+    else
+        if dashSavedPos then
+            local myRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            if myRoot then
+                pcall(function()
+                    myRoot.CFrame = dashSavedPos
+                    myRoot.AssemblyLinearVelocity = Vector3.zero
+                end)
+            end
+        end
+        ResetDash()
+        Config.Target = nil; Config.TargetName = ""
+        ORLastTarget = nil
+        statusLbl.Text = "Che do: " .. Config.ORMode .. " | OFF"
+        statusLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+    end
+end, PageOR, 172, function() return "[kas] ĐÃ BẬT OR XOAY, MODE " .. Config.ORMode end)
+
+AddToggle("LAG MODE", function() return State.LAGMode end, function(v) State.LAGMode = v end, PageOR, 206)
+
+AddButton("🎯 OR AUTO", function()
+    local n = FindNearest(Config.ORRange)
+    if n then
+        TargetBox.Text = n.Name
+        Config.TargetName = n.Name
+        Config.Target = n
+        State.ORLock = true
+        ResetDash()
+        statusLbl.Text = "Che do: " .. Config.ORMode .. " | " .. n.Name
+        statusLbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+    end
+end, PageOR, 238)
+
+AddTitle("⚙ CAI DAT OR", PageOR, 272)
+AddSlider("OR NEAR", Config.ORNear, 3, 80, function(v) Config.ORNear=v end, PageOR, 296)
+AddSlider("OR DIST", Config.ORDistance, 1, 20, function(v) Config.ORDistance=v end, PageOR, 336)
+AddSlider("OR HEIGHT", Config.ORHeight, -5, 20, function(v) Config.ORHeight=v end, PageOR, 376)
+AddSlider("TOC DO XOAY", Config.ORRotSpeed, 1, 300, function(v) Config.ORRotSpeed=v end, PageOR, 416)
+AddSlider("WALK SPEED", Config.ORWalkSpeed, 5, 100, function(v) Config.ORWalkSpeed=v end, PageOR, 456)
+
+AddTitle("💥 DASH ORBIT CYCLE", PageOR, 500)
+AddSlider("DASH ATTACK TIME", Config.DashAttackDuration, 1, 30, function(v) Config.DashAttackDuration=v end, PageOR, 524)
+AddSlider("DASH HIT RATE", Config.DashHitRate, 0.03, 0.5, function(v) Config.DashHitRate=v end, PageOR, 564, true)
+AddSlider("DASH RADIUS", Config.DashOrbitRadius, 1, 15, function(v) Config.DashOrbitRadius=v end, PageOR, 604)
+AddSlider("DASH ORBIT SPEED", Config.DashOrbitSpeed, 50, 600, function(v) Config.DashOrbitSpeed=v end, PageOR, 644)
+AddSlider("DASH GROUND OFFSET", Config.DashGroundOffset, 1, 10, function(v) Config.DashGroundOffset=v end, PageOR, 684)
+
+-- PAGE FARM
+AddTitle("💰 FARM TIEN", PageFarm, 6)
+AddToggle("FARM", function() return State.Farm end, function(v)
+    State.Farm = v
+    if v then Config.FarmWaiting = true
+    else Config.FarmWaiting = false; Config.FarmRunning = false end
+end, PageFarm, 30)
+AddButton("📍 LUU VI TRI", function()
+    local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if r then Config.FarmPos = r.CFrame end
+end, PageFarm, 62)
+AddButton("🗑 XOA DU LIEU", function() Config.FarmPos = nil end,
+    PageFarm, 92, Color3.fromRGB(255, 100, 100))
+AddSlider("BAN KINH QUET", Config.FarmRadius, 5, 100, function(v) Config.FarmRadius=v end, PageFarm, 128)
+AddSlider("SO CLICK / VAT", Config.FarmClicks, 1, 20, function(v) Config.FarmClicks=v end, PageFarm, 168)
+AddSlider("CHO TRUOC RESET", Config.FarmDelay, 1, 30, function(v) Config.FarmDelay=v end, PageFarm, 208, true)
+
+-- PAGE ATK
+AddTitle("⚔ TAN CONG", PageAtk, 6)
+AddToggle("SPAM DANH", function() return State.Spam end,
+    function(v) State.Spam=v; if v then GetTool() end end, PageAtk, 30,
+    function() return "[kas] ĐÃ BẬT SPAM DANH, RATE " .. string.format("%.2f", Config.SpamRate) end)
+AddToggle("AIMBOT", function() return State.Aim end, function(v) State.Aim=v end, PageAtk, 62)
+AddToggle("ANTI STUN", function() return State.AntiStun end, function(v) State.AntiStun=v end, PageAtk, 94)
+AddSlider("SPAM RATE", Config.SpamRate, 0.02, 0.5, function(v) Config.SpamRate=v end, PageAtk, 128, true)
+
+AddTitle("🔄 TỰ ĐỘNG RESET (HỒI CHIÊU)", PageAtk, 170)
+AddToggle("AUTO RESET", function() return Config.AutoReset end, function(v) 
+    Config.AutoReset = v 
+    lastResetTimer = tick()
+end, PageAtk, 194, function() return "[kas] ĐÃ BẬT TỰ ĐỘNG RESET" end)
+AddSlider("RESET TIME (MAX 50)", Config.ResetTime, 1, 50, function(v) Config.ResetTime=v end, PageAtk, 226)
+
+AddTitle("🕳️ VOID CORE", PageAtk, 270)
+AddToggle("BẬT AUTO BLOCK", function() return State.AutoBlock end, function(v)
+    State.AutoBlock = v
+    isBlockActive = v
+    if not v then rawUnblock() end
+end, PageAtk, 294)
+
+local voidStatus = Instance.new("TextLabel", PageAtk)
+voidStatus.Size = UDim2.new(1, -8, 0, 30)
+voidStatus.Position = UDim2.new(0, 4, 0, 326)
+voidStatus.BackgroundTransparency = 1
+voidStatus.Text = "Trang thai: OFF\nSo don do: 0"
+voidStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+voidStatus.TextSize = 9
+voidStatus.Font = Enum.Font.GothamBold
+voidStatus.TextXAlignment = Enum.TextXAlignment.Left
+
+-- PAGE MOVE
+AddTitle("🏃 DI CHUYEN", PageMove, 6)
+AddToggle("DASH NHANH", function() return State.Dash end, function(v) State.Dash=v end, PageMove, 30)
+AddToggle("BAY", function() return State.Fly end, function(v) State.Fly=v end, PageMove, 62)
+AddToggle("TP LUNG", function() return State.TP end, function(v) State.TP=v end, PageMove, 94)
+AddToggle("NOCLIP", function() return State.NoClip end, function(v) State.NoClip=v end, PageMove, 126)
+AddSlider("FLY SPEED", Config.FlySpeed, 1, 300, function(v) Config.FlySpeed=v end, PageMove, 160)
+AddSlider("TP DIST", Config.TPDistance, 1, 50, function(v) Config.TPDistance=v end, PageMove, 200)
+
+-- PAGE VIS
+AddTitle("👁 HIEN THI", PageVis, 6)
+AddToggle("ESP", function() return State.ESP end, function(v) State.ESP=v end, PageVis, 30)
+AddToggle("HITBOX", function() return State.Hitbox end, function(v) State.Hitbox=v end, PageVis, 62,
+    function() return "[kas] ĐÃ BẬT HITBOX VÀ CHỈNH " .. Config.HitboxSize end)
+AddSlider("HITBOX SIZE", Config.HitboxSize, 5, 200, function(v) Config.HitboxSize=v end, PageVis, 96)
+AddToggle("NAMETAG", function() return State.Nametag end, function(v) State.Nametag=v end, PageVis, 140)
+
+-- PAGE AURA
+AddTitle("✨ AURA", PageAura, 6)
+AddToggle("AURA", function() return State.Aura end, function(v) State.Aura=v end, PageAura, 30)
+
+-- PAGE EXTRA
+AddTitle("🎁 TIEN ICH MOI", PageExtra, 6)
+AddToggle("SPIN (Xoay nguoi)", function() return State.Spin end, function(v) State.Spin=v end, PageExtra, 30)
+AddToggle("TROLL CON CU (SCP)", function() return State.Troll end, function(v) State.Troll=v end, PageExtra, 62,
+    function() return "[kas] ĐÃ BẬT TROLL CON CU" end)-- ==========================================================
+-- PHAN 3/3: MONSTER PAGE + LOGIC LOOP + OBSERVE + BOOT
+-- ==========================================================
+
+-- ==========================================================
+-- PAGE MONSTER (QUAI)
+-- ==========================================================
+local function IsMonster(model)
+    if not model or not model:IsA("Model") then return false end
+    local hum = model:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    if model == LocalPlayer.Character then return false end
+    local plr = Players:GetPlayerFromCharacter(model)
+    if plr then return false end
+    local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+    if not root then return false end
+    return true
+end
+
+local function GetMonsterRoot(model)
+    return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+end
+
+local function ScanMonsters()
+    local list = {}
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("Model") and IsMonster(v) then
+            table.insert(list, v)
+        end
+    end
+    return list
+end
+
+local function FindTargetByNamePartial(partial)
+    if not partial or partial == "" then return nil end
+    local low = string.lower(partial)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and string.find(string.lower(p.Name), low, 1, true) then
+            return p
+        end
+    end
+    return nil
+end
+
+local function CollectAllMonsters()
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return end
+    local found = ScanMonsters()
+    local count = 0
+    for _, model in ipairs(found) do
+        if count >= Config.MonsterMax then break end
+        local root = GetMonsterRoot(model)
+        if root then
+            local angle = (count / math.max(1, #found)) * math.pi * 2
+            local pos = myRoot.Position + Vector3.new(
+                math.cos(angle) * Config.MonsterOrbitRadius,
+                Config.MonsterOrbitHeight,
+                math.sin(angle) * Config.MonsterOrbitRadius
+            )
+            pcall(function()
+                model:PivotTo(CFrame.new(pos))
+                local hum = model:FindFirstChildOfClass("Humanoid")
+                if hum then hum.WalkSpeed = 0 end
+            end)
+            monsters[model] = true
+            count = count + 1
+        end
+    end
+end
+
+local function SummonAgainstTarget()
+    local target = Config.MonsterTarget
+    if not target or not target.Character then return end
+    local tRoot = target.Character:FindFirstChild("HumanoidRootPart")
+    if not tRoot then return end
+    local found = ScanMonsters()
+    local count = 0
+    for _, model in ipairs(found) do
+        if count >= Config.MonsterMax then break end
+        local root = GetMonsterRoot(model)
+        local hum = model:FindFirstChildOfClass("Humanoid")
+        if root and hum then
+            if Config.MonsterMode == "TP" then
+                local offset = Vector3.new(math.random(-4, 4), 2, math.random(-4, 4))
+                pcall(function() model:PivotTo(CFrame.new(tRoot.Position + offset)) end)
+            end
+            monsters[model] = true
+            count = count + 1
+        end
+    end
+end
+
+AddTitle("📥 THU THAP QUAI", PageMonster, 6)
+AddToggle("TP TOAN BO QUAI VE QUANH MINH", function() return State.MonsterCollect end, function(v)
+    State.MonsterCollect = v
+    if v then CollectAllMonsters()
+    else monsters = {} end
+end, PageMonster, 30)
+AddButton("🔍 QUET LAI QUAI", function()
+    if State.MonsterCollect then CollectAllMonsters() end
+end, PageMonster, 62, Color3.fromRGB(255, 160, 60))
+
+AddTitle("🎯 TRIEU HOI QUAI DANH PLAYER", PageMonster, 96)
+local MonsterTargetBox = AddTextBox("Nhap 1 phan ten player...", PageMonster, 120)
+AddButton("▶ BAT DAU TRIEU HOI", function()
+    Config.MonsterTargetName = MonsterTargetBox.Text
+    local t = FindTargetByNamePartial(Config.MonsterTargetName)
+    if t then
+        Config.MonsterTarget = t
+        SummonAgainstTarget()
+    end
+end, PageMonster, 150, Color3.fromRGB(255, 120, 60))
+
+AddButton("⏹ DUNG TRIEU HOI", function()
+    Config.MonsterMode = "OFF"
+    Config.MonsterTarget = nil
+    State.MonsterSummon = false
+    for model, _ in pairs(monsters) do
+        pcall(function()
+            local hum = model:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = 0 end
+        end)
+    end
+end, PageMonster, 180, Color3.fromRGB(200, 50, 50))
+
+local MonsterModeFrame = Instance.new("Frame", PageMonster)
+MonsterModeFrame.Size = UDim2.new(1, -8, 0, 24)
+MonsterModeFrame.Position = UDim2.new(0, 4, 0, 214)
+MonsterModeFrame.BackgroundTransparency = 1
+
+local MonsterWalkBtn = Instance.new("TextButton", MonsterModeFrame)
+MonsterWalkBtn.Size = UDim2.new(0.48, 0, 1, 0)
+MonsterWalkBtn.Position = UDim2.new(0, 0, 0, 0)
+MonsterWalkBtn.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+MonsterWalkBtn.Text = "🚶 WALK (di bo)"
+MonsterWalkBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+MonsterWalkBtn.TextSize = 9
+MonsterWalkBtn.Font = Enum.Font.GothamBold
+MonsterWalkBtn.BorderSizePixel = 0
+Instance.new("UICorner", MonsterWalkBtn).CornerRadius = UDim.new(0, 5)
+MonsterWalkBtn.MouseButton1Click:Connect(function()
+    Config.MonsterMode = "WALK"
+    Config.MonsterTargetName = MonsterTargetBox.Text
+    Config.MonsterTarget = FindTargetByNamePartial(Config.MonsterTargetName)
+    State.MonsterSummon = true
+    if Config.MonsterTarget then SummonAgainstTarget() end
+    MonsterWalkBtn.BackgroundColor3 = Color3.fromRGB(200, 100, 20)
+    MonsterWalkBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+    MonsterTPBtn.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    MonsterTPBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+end)
+
+local MonsterTPBtn = Instance.new("TextButton", MonsterModeFrame)
+MonsterTPBtn.Size = UDim2.new(0.48, 0, 1, 0)
+MonsterTPBtn.Position = UDim2.new(0.52, 0, 0, 0)
+MonsterTPBtn.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+MonsterTPBtn.Text = "⚡ TP (dich thang)"
+MonsterTPBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+MonsterTPBtn.TextSize = 9
+MonsterTPBtn.Font = Enum.Font.GothamBold
+MonsterTPBtn.BorderSizePixel = 0
+Instance.new("UICorner", MonsterTPBtn).CornerRadius = UDim.new(0, 5)
+MonsterTPBtn.MouseButton1Click:Connect(function()
+    Config.MonsterMode = "TP"
+    Config.MonsterTargetName = MonsterTargetBox.Text
+    Config.MonsterTarget = FindTargetByNamePartial(Config.MonsterTargetName)
+    State.MonsterSummon = true
+    if Config.MonsterTarget then SummonAgainstTarget() end
+    MonsterTPBtn.BackgroundColor3 = Color3.fromRGB(200, 100, 20)
+    MonsterTPBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+    MonsterWalkBtn.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+    MonsterWalkBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+end)
+
+AddTitle("⚙ CAI DAT QUAI", PageMonster, 248)
+AddToggle("ORBIT (xoay quanh minh)", function() return State.MonsterOrbit end, function(v) State.MonsterOrbit = v end, PageMonster, 272)
+AddToggle("TU DONG DANH", function() return State.MonsterAttack end, function(v) State.MonsterAttack = v end, PageMonster, 304)
+
+AddSlider("ORBIT BAN KINH", Config.MonsterOrbitRadius, 2, 30, function(v) Config.MonsterOrbitRadius=v end, PageMonster, 338)
+AddSlider("ORBIT DO CAO", Config.MonsterOrbitHeight, 0, 20, function(v) Config.MonsterOrbitHeight=v end, PageMonster, 378)
+AddSlider("ORBIT TOC DO", Config.MonsterOrbitSpeed, 10, 360, function(v) Config.MonsterOrbitSpeed=v end, PageMonster, 418)
+AddSlider("AGGRO RANGE", Config.MonsterAggroRange, 10, 500, function(v) Config.MonsterAggroRange=v end, PageMonster, 458)
+AddSlider("ATTACK CD", Config.MonsterAttackCD, 0.1, 3, function(v) Config.MonsterAttackCD=v end, PageMonster, 498, true)
+AddSlider("FOLLOW SPEED", Config.MonsterFollowSpeed, 0.5, 4, function(v) Config.MonsterFollowSpeed=v end, PageMonster, 538, true)
+AddSlider("MAX QUAI", Config.MonsterMax, 5, 200, function(v) Config.MonsterMax=v end, PageMonster, 578)
+
+AddTitle("📊 TRANG THAI QUAI", PageMonster, 620)
+local MonsterStatusLbl = Instance.new("TextLabel", PageMonster)
+MonsterStatusLbl.Size = UDim2.new(1, -8, 0, 60)
+MonsterStatusLbl.Position = UDim2.new(0, 4, 0, 644)
+MonsterStatusLbl.BackgroundColor3 = Color3.fromRGB(15, 18, 25)
+MonsterStatusLbl.Text = "Quai dang kiem soat: 0\nTarget: (chua co)\nMode: OFF"
+MonsterStatusLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+MonsterStatusLbl.TextSize = 9
+MonsterStatusLbl.Font = Enum.Font.GothamBold
+MonsterStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+MonsterStatusLbl.TextYAlignment = Enum.TextYAlignment.Top
+Instance.new("UICorner", MonsterStatusLbl).CornerRadius = UDim.new(0, 6)
+local msp = Instance.new("UIPadding", MonsterStatusLbl)
+msp.PaddingLeft = UDim.new(0, 8)
+msp.PaddingTop = UDim.new(0, 6)
+
+-- PAGE SET
+AddTitle("⚙ CAI DAT", PageSet, 6)
+AddToggle("GOD MODE", function() return State.GodMode end, function(v) State.GodMode=v end, PageSet, 30)
+AddToggle("NO HUNGER", function() return State.NoHunger end, function(v) State.NoHunger=v end, PageSet, 62)
+
+AddTitle("🤝 ĐỒNG MINH", PageSet, 100)
+local AllyFrame = Instance.new("Frame", PageSet)
+AllyFrame.Size = UDim2.new(1, -8, 0, 300)
+AllyFrame.Position = UDim2.new(0, 4, 0, 124)
+AllyFrame.BackgroundTransparency = 1
+
+local function RefreshAlly()
+    for _, c in ipairs(AllyFrame:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    local yy = 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local f = Instance.new("Frame", AllyFrame)
+            f.Size = UDim2.new(1, -5, 0, 24)
+            f.Position = UDim2.new(0, 0, 0, yy)
+            f.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+            Instance.new("UICorner", f).CornerRadius = UDim.new(0, 5)
+            local l = Instance.new("TextLabel", f)
+            l.Size = UDim2.new(1, -40, 1, 0)
+            l.Position = UDim2.new(0, 8, 0, 0)
+            l.BackgroundTransparency = 1
+            l.Text = p.Name
+            l.TextColor3 = Color3.fromRGB(200, 200, 200)
+            l.Font = Enum.Font.GothamBold
+            l.TextSize = 9
+            l.TextXAlignment = Enum.TextXAlignment.Left
+            local b = Instance.new("TextButton", f)
+            b.Size = UDim2.new(0, 30, 0, 14)
+            b.Position = UDim2.new(1, -35, 0.5, -7)
+            b.BackgroundColor3 = Allies[p.Name] and Color3.fromRGB(50, 100, 255) or Color3.fromRGB(50, 50, 60)
+            Instance.new("UICorner", b).CornerRadius = UDim.new(1, 0)
+            b.MouseButton1Click:Connect(function()
+                Allies[p.Name] = not Allies[p.Name]
+                b.BackgroundColor3 = Allies[p.Name] and Color3.fromRGB(50, 100, 255) or Color3.fromRGB(50, 50, 60)
+            end)
+            yy = yy + 28
+        end
+    end
+end
+RefreshAlly()
+Players.PlayerAdded:Connect(function() task.wait(1) RefreshAlly() end)
+Players.PlayerRemoving:Connect(function() task.wait(1) RefreshAlly() end)
+
+ShowPage(1)
+
+-- ==========================================================
+-- HOME + DRAG
+-- ==========================================================
+HomeBtn.MouseButton1Click:Connect(function()
+    if unlocked then
+        isOpen = not isOpen
+        Main.Visible = isOpen
+        HomeBtn.Text = isOpen and "✖" or "🍉"
+        ChatSpam(isOpen and "[kas] ĐÃ BẬT MENU 🍡" or "[kas] ĐÃ TẮT MENU 🍡")
+    else
+        KeyGui.Visible = true
+        KBox.Text = ""
+        KStatus.Text = ""
+        KBox:CaptureFocus()
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        if unlocked then
+            isOpen = not isOpen
+            Main.Visible = isOpen
+            HomeBtn.Text = isOpen and "✖" or "🍉"
+        else
+            KeyGui.Visible = true
+            KBox.Text = ""
+            KStatus.Text = ""
+        end
+    end
+end)
+
+local dragging, dragStart, startPos
+HomeBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = HomeBtn.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        HomeBtn.Position = UDim2.new(
+            startPos.X.Scale, startPos.X.Offset + delta.X,
+            startPos.Y.Scale, startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+KBtn.MouseButton1Click:Connect(function()
+    if validateKey(KBox.Text) then
+        writeKeyRaw(KBox.Text .. "|" .. os.time())
+        KStatus.Text = "✅ Key hợp lệ!"
+        KStatus.TextColor3 = Color3.fromRGB(0, 255, 100)
+        task.wait(0.5)
+        KeyGui.Visible = false
+        unlocked = true
+        isOpen = true
+        Main.Visible = true
+        HomeBtn.Text = "✖"
+        ChatSpam("[kas] ĐÃ BẬT MENU 🍡")
+    else
+        KStatus.Text = "❌ Key không hợp lệ."
+        KStatus.TextColor3 = Color3.fromRGB(255, 100, 100)
+    end
+end)
+
+-- ==========================================================
+-- REMOTE SCAN
+-- ==========================================================
+task.spawn(function()
+    pcall(function()
+        for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
+            if v:IsA("RemoteEvent") then
+                local n = string.lower(v.Name)
+                if n:find("combat") or n:find("attack") or n:find("hit") or n:find("damage") or n:find("m1") then
+                    table.insert(Remotes, v)
+                end
+            end
+        end
+    end)
+end)
+
+-- ==========================================================
+-- LOGIC OR / DASH / EZY
+-- ==========================================================
+task.spawn(function()
+    while true do
+        task.wait(0.02)
+        if State.ORLock and not State.Farm then
+            pcall(function()
+                if not Valid(Config.Target) then
+                    local name = Config.TargetName
+                    if not name or name == "" then
+                        name = TargetBox.Text
+                        Config.TargetName = name
+                    end
+                    if name == "" then Config.Target = FindNearest(Config.ORRange)
+                    else Config.Target = FindByName(name) end
+                    if not Config.Target then ORLastTarget = nil return end
+                end
+                if ORLastTarget ~= Config.Target then ORLastTarget = Config.Target ResetDash() end
+                local tc = Config.Target.Character
+                local tRoot = tc and tc:FindFirstChild("HumanoidRootPart")
+                local myC = LocalPlayer.Character
+                local myRoot = myC and myC:FindFirstChild("HumanoidRootPart")
+                local myHum = myC and myC:FindFirstChildOfClass("Humanoid")
+                if not (tRoot and myRoot and myHum) then return end
+                local dist = (myRoot.Position - tRoot.Position).Magnitude
+                if dist > 2000 then return end
+                local tp = tRoot.Position
+
+                if Config.ORMode == "DASH" then
+                    local now = tick()
+                    local function groundAt(x, z, baseY)
+                        local rp = RaycastParams.new()
+                        rp.FilterType = Enum.RaycastFilterType.Exclude
+                        rp.FilterDescendantsInstances = {myC, tc}
+                        local hit = workspace:Raycast(Vector3.new(x, baseY + 20, z), Vector3.new(0, -80, 0), rp)
+                        return hit and hit.Position.Y or (baseY - 3)
+                    end
+                    local function tpToTarget()
+                        local behind = tp - tRoot.CFrame.LookVector * Config.DashOrbitRadius
+                        pcall(function()
+                            myRoot.CFrame = CFrame.lookAt(Vector3.new(behind.X, tp.Y, behind.Z), tp)
+                            myRoot.AssemblyLinearVelocity = Vector3.zero
+                        end)
+                    end
+                    if dashPhase == "idle" then
+                        dashSavedPos = myRoot.CFrame
+                        dashOrbitAngle = math.random() * math.pi * 2
+                        tpToTarget()
+                        dashPhase = "attack"
+                        dashTimer = now + Config.DashAttackDuration
+                        dashNextHit = 0
+                    elseif dashPhase == "attack" then
+                        dashOrbitAngle = dashOrbitAngle + math.rad(Config.DashOrbitSpeed) * 0.02
+                        local px = tp.X + math.cos(dashOrbitAngle) * Config.DashOrbitRadius
+                        local pz = tp.Z + math.sin(dashOrbitAngle) * Config.DashOrbitRadius
+                        local gy = groundAt(px, pz, tp.Y)
+                        local desired = Vector3.new(px, gy + Config.DashGroundOffset, pz)
+                        pcall(function()
+                            myRoot.CFrame = CFrame.lookAt(desired, Vector3.new(tp.X, desired.Y, tp.Z))
+                            myRoot.AssemblyLinearVelocity = Vector3.zero
+                        end)
+                        if now >= dashNextHit then
+                            dashNextHit = now + Config.DashHitRate
+                            HitAll(Config.Target)
+                        end
+                        if now >= dashTimer then
+                            if dashSavedPos then
+                                pcall(function()
+                                    myRoot.CFrame = dashSavedPos
+                                    myRoot.AssemblyLinearVelocity = Vector3.zero
+                                end)
+                            end
+                            dashPhase = "wait"
+                            dashTimer = now + Config.DashWaitDuration
+                        end
+                    elseif dashPhase == "wait" then
+                        if now >= dashTimer then
+                            dashOrbitAngle = math.random() * math.pi * 2
+                            tpToTarget()
+                            dashPhase = "attack"
+                            dashTimer = now + Config.DashAttackDuration
+                            dashNextHit = 0
+                        end
+                    end
+                elseif Config.ORMode == "EZY" then
+                    local behind = tp - tRoot.CFrame.LookVector * Config.DashOrbitRadius
+                    local dir = behind - myRoot.Position
+                    if dir.Magnitude > 1.5 then
+                        myRoot.AssemblyLinearVelocity = dir.Unit * (Config.ORWalkSpeed * 10)
+                    else
+                        myRoot.AssemblyLinearVelocity = Vector3.zero
+                        pcall(function() myRoot.CFrame = CFrame.lookAt(myRoot.Position, tp) end)
+                    end
+                    EzyFastAttack(Config.Target)
+                else
+                    local fp
+                    local dcf = tRoot.CFrame
+                    if Config.ORMode == "FOLLOW" then fp = tp - dcf.LookVector * Config.ORDistance
+                    elseif Config.ORMode == "BEHIND" then fp = tp - dcf.LookVector * Config.ORDistance
+                    elseif Config.ORMode == "ORBIT" then
+                        Config.orbitAngle = Config.orbitAngle + math.rad(Config.ORRotSpeed) * 0.05
+                        fp = tp + Vector3.new(math.cos(Config.orbitAngle)*Config.ORDistance, Config.ORHeight, math.sin(Config.orbitAngle)*Config.ORDistance)
+                    else fp = tp - dcf.LookVector * Config.ORDistance end
+                    pcall(function()
+                        myRoot.CFrame = CFrame.lookAt(fp + Vector3.new(0, Config.ORHeight, 0), tp + Vector3.new(0, Config.ORHeight, 0))
+                        myRoot.AssemblyLinearVelocity = Vector3.zero
+                    end)
+                    if dist <= Config.ORNear then HitAll(Config.Target) end
+                end
+            end)
+        end
+    end
+end)
+
+-- M1 SPAM
+task.spawn(function()
+    local nf = 0
+    while true do
+        task.wait(0.02)
+        if State.M1Spam then
+            local now = tick()
+            if now >= nf then
+                nf = now + Config.M1Rate
+                pcall(function()
+                    local t = State.ORLock and Valid(Config.Target) and Config.Target or FindNearest(Config.AttackRange)
+                    if t then
+                        local mr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        local tr = t.Character:FindFirstChild("HumanoidRootPart")
+                        if mr and tr and Config.ORMode ~= "DASH" and Config.ORMode ~= "EZY" then
+                            mr.CFrame = CFrame.lookAt(mr.Position, tr.Position)
+                        end
+                        HitAll(t)
+                    end
+                end)
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(Config.SpamRate)
+        if State.Spam and Config.ORMode ~= "DASH" and Config.ORMode ~= "EZY" then
+            pcall(function()
+                local t = State.ORLock and Valid(Config.Target) and Config.Target or FindNearest(Config.AttackRange)
+                if t then HitAll(t) end
+            end)
+        end
+    end
+end)
+
+-- FARM LOOP
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if State.Farm and not Config.FarmRunning and not Config.FarmWaiting then
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            local hum  = char and char:FindFirstChildOfClass("Humanoid")
+            if root and hum and hum.Health > 0 then
+                Config.FarmRunning = true
+                local objs = {}
+                for _, v in ipairs(workspace:GetDescendants()) do
+                    pcall(function()
+                        local item
+                        if v:IsA("ProximityPrompt") then item = {type="prompt", obj=v, part=v.Parent}
+                        elseif v:IsA("ClickDetector") then item = {type="click", obj=v, part=v.Parent} end
+                        if item and item.part and item.part:IsA("BasePart") then
+                            if (item.part.Position - root.Position).Magnitude <= Config.FarmRadius then
+                                table.insert(objs, item)
+                            end
+                        end
+                    end)
+                end
+                for _, item in ipairs(objs) do
+                    if not State.Farm then break end
+                    for i = 1, Config.FarmClicks do
+                        if not State.Farm then break end
+                        if item.type == "prompt" then
+                            pcall(function()
+                                item.obj:InputHoldBegin()
+                                task.wait(0.08)
+                                item.obj:InputHoldEnd()
+                            end)
+                        elseif item.type == "click" then
+                            pcall(function() fireclickdetector(item.obj) end)
+                        end
+                        local t = GetTool()
+                        if t then pcall(function() t:Activate() end) end
+                        task.wait(0.15)
+                    end
+                end
+                if State.Farm then
+                    task.wait(Config.FarmDelay)
+                    local oldChar = LocalPlayer.Character
+                    pcall(function()
+                        if oldChar then
+                            local h = oldChar:FindFirstChildOfClass("Humanoid")
+                            if h then h.Health = 0 end
+                        end
+                    end)
+                    local wT = 0
+                    while State.Farm and wT < 10 do
+                        task.wait(0.2)
+                        wT = wT + 0.2
+                        local nc = LocalPlayer.Character
+                        if nc and nc ~= oldChar then
+                            local nh = nc:FindFirstChildOfClass("Humanoid")
+                            if nh and nh.Health > 0 then break end
+                        end
+                    end
+                    if State.Farm and Config.FarmPos then
+                        task.wait(0.5)
+                        for i = 1, 30 do
+                            if not State.Farm then break end
+                            local r2 = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                            if r2 then
+                                pcall(function()
+                                    r2.CFrame = Config.FarmPos
+                                    r2.AssemblyLinearVelocity = Vector3.zero
+                                end)
+                            end
+                            task.wait(0.1)
+                        end
+                    end
+                end
+                Config.FarmRunning = false
+            end
+        end
+    end
+end)
+
+-- TROLL LOOP
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        if State.Troll then
+            local myChar = LocalPlayer.Character
+            local root = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if root then
+                if not trollPart or not trollPart.Parent then
+                    trollPart = Instance.new("Part")
+                    trollPart.Name = "TrollCu"
+                    trollPart.Size = Vector3.new(0.5, 2, 0.5)
+                    trollPart.Color = Color3.fromRGB(255, 180, 180)
+                    trollPart.Material = Enum.Material.SmoothPlastic
+                    trollPart.CanCollide = false
+                    trollPart.Massless = true
+                    trollPart.Anchored = true
+                    trollPart.Parent = workspace
+                end
+                trollPart.CFrame = root.CFrame * CFrame.new(0, -1, -0.5) * CFrame.Angles(math.rad(math.random(-20, 20)), 0, 0)
+            end
+        else
+            if trollPart then trollPart:Destroy(); trollPart = nil end
+        end
+    end
+end)
+
+-- MONSTER LOOP
+task.spawn(function()
+    while true do
+        task.wait(0.05)
+        pcall(function()
+            if State.MonsterCollect and next(monsters) == nil then
+                CollectAllMonsters()
+            end
+            local myChar = LocalPlayer.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            if not myRoot then return end
+            local target = Config.MonsterTarget
+            local tRoot = target and target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+            monsterOrbitAngle = monsterOrbitAngle + math.rad(Config.MonsterOrbitSpeed) * 0.05
+            local i = 0
+            local totalMon = 0
+            for m in pairs(monsters) do totalMon = totalMon + 1 end
+            for model, _ in pairs(monsters) do
+                i = i + 1
+                if not model.Parent or not IsMonster(model) then
+                    monsters[model] = nil
+                    monsterAttackTime[model] = nil
+                else
+                    local root = GetMonsterRoot(model)
+                    local hum = model:FindFirstChildOfClass("Humanoid")
+                    if root and hum then
+                        if State.MonsterSummon and Config.MonsterMode ~= "OFF" and tRoot then
+                            local dist = (root.Position - tRoot.Position).Magnitude
+                            if Config.MonsterMode == "TP" then
+                                if dist > 10 then
+                                    local off = Vector3.new(math.random(-4, 4), 2, math.random(-4, 4))
+                                    pcall(function() model:PivotTo(CFrame.new(tRoot.Position + off)) end)
+                                end
+                            elseif Config.MonsterMode == "WALK" then
+                                if dist > 3 then
+                                    pcall(function()
+                                        hum.WalkSpeed = 25 * Config.MonsterFollowSpeed
+                                        hum:MoveTo(tRoot.Position)
+                                    end)
+                                else
+                                    pcall(function() hum.WalkSpeed = 0 end)
+                                end
+                            end
+                            if State.MonsterAttack and dist <= 8 then
+                                local now = tick()
+                                local last = monsterAttackTime[model] or 0
+                                if now - last >= Config.MonsterAttackCD then
+                                    monsterAttackTime[model] = now
+                                    local th = target.Character and target.Character:FindFirstChildOfClass("Humanoid")
+                                    if th and th.Health > 0 then
+                                        pcall(function() th:TakeDamage(15) end)
+                                        pcall(function()
+                                            local cr = ReplicatedStorage:FindFirstChild("CombatRemote")
+                                            if cr then cr:FireServer("M1", target) end
+                                        end)
+                                        for _, r in ipairs(ReplicatedStorage:GetDescendants()) do
+                                            if (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
+                                                local n = string.lower(r.Name)
+                                                if n:find("attack") or n:find("damage") or n:find("hit") then
+                                                    pcall(function() r:FireServer(target, 15) end)
+                                                    pcall(function() r:FireServer(target) end)
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        if State.MonsterOrbit and (not State.MonsterSummon or Config.MonsterMode == "OFF" or not tRoot) then
+                            local angle = monsterOrbitAngle + (i / math.max(1, totalMon)) * math.pi * 2
+                            local pos = myRoot.Position + Vector3.new(
+                                math.cos(angle) * Config.MonsterOrbitRadius,
+                                Config.MonsterOrbitHeight,
+                                math.sin(angle) * Config.MonsterOrbitRadius
+                            )
+                            pcall(function()
+                                model:PivotTo(CFrame.new(pos, myRoot.Position))
+                                hum.WalkSpeed = 0
+                            end)
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+-- Monster status
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        local count = 0
+        for m in pairs(monsters) do
+            if m.Parent and IsMonster(m) then count = count + 1 end
+        end
+        local tname = Config.MonsterTarget and Config.MonsterTarget.Name or "(chua co)"
+        MonsterStatusLbl.Text = string.format(
+            "Quai dang kiem soat: %d\nTarget: %s\nMode: %s",
+            count, tname, Config.MonsterMode
+        )
+    end
+end)
+
+-- Monster auto re-target
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if Config.MonsterTarget and (not Config.MonsterTarget.Parent or not Config.MonsterTarget.Character) then
+            if Config.MonsterTargetName ~= "" then
+                Config.MonsterTarget = FindTargetByNamePartial(Config.MonsterTargetName)
+            else
+                Config.MonsterTarget = nil
+            end
+        end
+    end
+end)
+
+-- HEARTBEAT
+RunService.Heartbeat:Connect(function()
+    pcall(function()
+        if isBlockActive then
+            voidStatus.Text = "Trang thai: ON 🟢\nSo don do: " .. totalBlocksTriggered
+            voidStatus.TextColor3 = Color3.fromRGB(0, 255, 100)
+        else
+            voidStatus.Text = "Trang thai: OFF ⚪\nSo don do: " .. totalBlocksTriggered
+            voidStatus.TextColor3 = Color3.fromRGB(200, 200, 200)
+        end
+        if isBlockActive then
+            if activeM2Count > 0 then rawUnblock()
+            else
+                local myChar = LocalPlayer.Character
+                if myChar then
+                    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+                    if myRoot then
+                        local myPos = myRoot.Position
+                        local m1Detected = false
+                        for _, p in ipairs(Players:GetPlayers()) do
+                            if p ~= LocalPlayer and p.Character then
+                                local cRoot = p.Character:FindFirstChild("HumanoidRootPart")
+                                local cHum = p.Character:FindFirstChild("Humanoid")
+                                if cRoot and cHum and cHum.Health > 0 then
+                                    local dx = cRoot.Position.X - myPos.X
+                                    local dy = cRoot.Position.Y - myPos.Y
+                                    local dz = cRoot.Position.Z - myPos.Z
+                                    if (dx*dx+dy*dy+dz*dz) <= COMBAT_RANGE_SQ then
+                                        local anims = cHum:GetPlayingAnimationTracks()
+                                        for i = 1, #anims do
+                                            local track = anims[i]
+                                            local animObj = track.Animation
+                                            if animObj and M1_Hash[animObj.AnimationId] then
+                                                m1Detected = true
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                                if m1Detected then break end
+                            end
+                        end
+                        if m1Detected then
+                            lastM1Time = tick()
+                            rawBlock()
+                        else
+                            if isBlocking and (tick() - lastM1Time) > BUFFER_TIME then rawUnblock() end
+                        end
+                    end
+                end
+            end
+        end
+        if Config.AutoReset then
+            local myChar = LocalPlayer.Character
+            local myHum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+            if myHum and myHum.Health > 0 then
+                if State.ORLock or State.M1Spam or State.Spam then
+                    if tick() - lastResetTimer >= Config.ResetTime then
+                        if resetEvent then pcall(function() resetEvent:FireServer() end) end
+                        lastResetTimer = tick()
+                    end
+                else lastResetTimer = tick() end
+            else lastResetTimer = tick() end
+        end
+        if State.Nametag then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and p.Character then
+                    local head = p.Character:FindFirstChild("Head")
+                    local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                    if head and hum then
+                        local tag = head:FindFirstChild("NameTagGUI")
+                        if not tag then
+                            tag = Instance.new("BillboardGui")
+                            tag.Name = "NameTagGUI"
+                            tag.Adornee = head
+                            tag.Size = UDim2.new(0, 200, 0, 50)
+                            tag.StudsOffset = Vector3.new(0, 3, 0)
+                            tag.AlwaysOnTop = true
+                            tag.Parent = head
+                            local lbl = Instance.new("TextLabel", tag)
+                            lbl.Size = UDim2.new(1, 0, 1, 0)
+                            lbl.BackgroundTransparency = 1
+                            lbl.TextScaled = true
+                            lbl.TextColor3 = Color3.fromRGB(0, 255, 100)
+                            lbl.Font = Enum.Font.GothamBold
+                        end
+                        local mr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        local tr = p.Character:FindFirstChild("HumanoidRootPart")
+                        local d = mr and tr and (mr.Position - tr.Position).Magnitude or 0
+                        local lbl = tag:FindFirstChildOfClass("TextLabel")
+                        if lbl then
+                            lbl.Text = p.Name .. " | " .. math.floor(hum.Health) .. "HP | " .. math.floor(d) .. "m"
+                        end
+                    end
+                end
+            end
+        else
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p.Character then
+                    local head = p.Character:FindFirstChild("Head")
+                    if head then
+                        local tag = head:FindFirstChild("NameTagGUI")
+                        if tag then tag:Destroy() end
+                    end
+                end
+            end
+        end
+        if State.Spin then
+            local c = LocalPlayer.Character
+            if c then
+                local hrp = c:FindFirstChild("HumanoidRootPart")
+                if hrp then hrp.CFrame = hrp.CFrame * CFrame.Angles(0, math.rad(15), 0) end
+            end
+        end
+        if State.AntiStun then
+            local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if h then
+                if h.PlatformStand then h.PlatformStand = false end
+                if h.Sit then h.Sit = false end
+                h.AutoRotate = true
+            end
+        end
+        if State.Dash then
+            local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if h then
+                local target = Config.AntiDetect and 60 or 200
+                if h.WalkSpeed ~= target then h.WalkSpeed = target end
+                if h.JumpPower ~= 80 then h.JumpPower = 80 end
+            end
+        end
+        if State.GodMode then
+            local c = LocalPlayer.Character
+            if c then
+                local h = c:FindFirstChildOfClass("Humanoid")
+                if h then h.MaxHealth = math.huge; h.Health = math.huge end
+                if State.NoHunger then
+                    for _, s in ipairs(c:GetDescendants()) do
+                        if s:IsA("NumberValue") then
+                            local n = s.Name:lower()
+                            if n:find("hunger") or n:find("thirst") or n:find("cold") or n:find("temperature") then
+                                s.Value = 100
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if State.NoClip then
+            local c = LocalPlayer.Character
+            if c then
+                for _, part in ipairs(c:GetDescendants()) do
+                    if part:IsA("BasePart") then part.CanCollide = false end
+                end
+                local hrp = c:FindFirstChild("HumanoidRootPart")
+                if hrp and hrp.Position.Y < -50 then
+                    hrp.CFrame = CFrame.new(hrp.Position.X, 50, hrp.Position.Z)
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                end
+            end
+        end
+        if State.Aim and Config.ORMode ~= "DASH" and Config.ORMode ~= "EZY" then
+            local t = State.ORLock and Valid(Config.Target) and Config.Target or FindNearest(Config.AttackRange)
+            if t then
+                local mr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local tr = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
+                if mr and tr then mr.CFrame = CFrame.lookAt(mr.Position, tr.Position) end
+            end
+        end
+        if State.TP and not State.ORLock then
+            local t = FindNearest(Config.AttackRange)
+            if t then
+                local mr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                local tr = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
+                if mr and tr then 
+                    mr.CFrame = tr.CFrame * CFrame.new(0, 0, Config.TPDistance)
+                    tpTarget = t
+                    tpStartTime = tick()
+                end
+            end
+        end
+        if State.TP and tpTarget then
+            local mr = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+            local tr = tpTarget.Character and tpTarget.Character:FindFirstChild("HumanoidRootPart")
+            if mr and tr then
+                if tick() - tpStartTime < 0.5 then
+                    mr.CFrame = tr.CFrame * CFrame.new(0, 0, Config.TPDistance)
+                else
+                    State.TP = false
+                    tpTarget = nil
+                end
+            else
+                State.TP = false
+                tpTarget = nil
+            end
+        end
+        for _, p in ipairs(Players:GetPlayers()) do
+            if Valid(p) then
+                local pc = p.Character
+                if State.ESP then
+                    if not pc:FindFirstChild("ESP_HL") then
+                        local hl = Instance.new("Highlight")
+                        hl.Name = "ESP_HL"
+                        hl.FillColor = Color3.fromRGB(0, 255, 100)
+                        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                        hl.FillTransparency = 0.5
+                        hl.Parent = pc
+                    end
+                else
+                    local hl = pc:FindFirstChild("ESP_HL")
+                    if hl then hl:Destroy() end
+                end
+            end
+        end
+    end)
+end)
+
+-- RENDER
+RunService.RenderStepped:Connect(function()
+    pcall(function()
+        if State.Hitbox then
+            for _, p in ipairs(Players:GetPlayers()) do
+                if p ~= LocalPlayer and p.Character then
+                    local r = p.Character:FindFirstChild("HumanoidRootPart")
+                    if r then
+                        r.Size = Vector3.new(Config.HitboxSize, Config.HitboxSize, Config.HitboxSize)
+                        r.Transparency = 0.7
+                        r.CanCollide = false
+                    end
+                end
+            end
+        end
+        if State.Fly and not State.Farm then
+            local c = LocalPlayer.Character
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            if r and h then
+                r.AssemblyLinearVelocity = h.MoveDirection * Config.FlySpeed + Vector3.new(0, 2, 0)
+            end
+        end
+    end)
+end)
+
+-- AURA
+local AuraFolder = nil
+task.spawn(function()
+    while true do
+        task.wait(0.1)
+        pcall(function()
+            if State.Aura then
+                local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                if r then
+                    if not AuraFolder or not AuraFolder.Parent then
+                        if AuraFolder then AuraFolder:Destroy() end
+                        AuraFolder = Instance.new("Folder")
+                        AuraFolder.Name = "PlayerAura"
+                        AuraFolder.Parent = workspace
+                    end
+                    local body = AuraFolder:FindFirstChild("BodyAura")
+                    if not body then
+                        body = Instance.new("Part")
+                        body.Name = "BodyAura"
+                        body.Shape = Enum.PartType.Ball
+                        body.Material = Enum.Material.Neon
+                        body.CanCollide = false
+                        body.Massless = true
+                        body.Parent = AuraFolder
+                        local wc = Instance.new("WeldConstraint")
+                        wc.Part0 = body
+                        wc.Part1 = r
+                        wc.Parent = body
+                    end
+                    body.Size = Vector3.new(8, 8, 8)
+                    body.Color = Color3.fromRGB(255, 0, 0)
+                    body.Transparency = 0.5
+                    body.CFrame = r.CFrame
+                end
+            else
+                if AuraFolder then AuraFolder:Destroy(); AuraFolder = nil end
+            end
+        end)
+    end
+end)
+
+-- BOOT
+if keyValidNow() then
+    unlocked = true
+    isOpen = true
+    Main.Visible = true
+    HomeBtn.Text = "✖"
+else
+    unlocked = false
+    isOpen = false
+    Main.Visible = false
+    HomeBtn.Text = "🍉"
+end
+
+task.spawn(function()
+    while true do
+        task.wait(60)
+        if unlocked and not keyValidNow() then
+            wipeKey()
+            unlocked = false
+            isOpen = false
+            Main.Visible = false
+            HomeBtn.Text = "🍉"
+            pcall(function()
+                State.M1Spam=false; State.ORLock=false; State.Farm=false
+                State.Aim=false; State.Spam=false; State.Dash=false
+                State.Fly=false; State.TP=false; State.ESP=false
+                State.Hitbox=false; State.Aura=false; State.AntiStun=false
+                State.GodMode=false; State.NoHunger=false
+                State.NoClip=false; State.Nametag=false; State.Spin=false
+                State.AutoBlock=false
+                State.MonsterCollect=false; State.MonsterSummon=false
+                ResetDash()
+                if rawUnblock then rawUnblock() end
+            end)
+            KeyGui.Visible = true
+            KStatus.Text = "⏰ Key đã hết hạn. Nhập key mới."
+            KStatus.TextColor3 = Color3.fromRGB(255, 180, 100)
+        end
+    end
+end)
+
+print("[HM] Loaded v6.6 — v6.5 FULL + Monster Control")
